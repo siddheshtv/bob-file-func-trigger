@@ -1,18 +1,19 @@
 import os
-import time
 import json
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 import PyPDF2
 import requests
 import dotenv
-
 import logging
+import hashlib
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import JSONResponse
+import uvicorn
+from io import BytesIO
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
-
-
 dotenv.load_dotenv()
+
+app = FastAPI()
 
 banking_departments = """
 Retail Banking/
@@ -37,38 +38,46 @@ Agricultural and Rural Banking/
 Small and Medium Enterprises (SME) Banking
 """
 
-class PDFHandler(FileSystemEventHandler):
+class PDFProcessor:
     def __init__(self, api_key, api_url):
         self.api_key = api_key
         self.api_url = api_url
+        self.processed_files = set()
 
-    def on_created(self, event):
-        if not event.is_directory and event.src_path.endswith('.pdf'):
-            self.process_pdf(event.src_path)
-
-    def process_pdf(self, pdf_path):
+    async def process_pdf(self, file: UploadFile):
         try:
-            text = self.extract_text_from_pdf(pdf_path)
+            contents = await file.read()
+            file_hash = self.get_file_hash(contents)
+            
+            if file_hash in self.processed_files:
+                return JSONResponse(content={"message": "Duplicate file, skipped processing"}, status_code=200)
+
+            text = self.extract_text_from_pdf(contents)
             if not text:
-                logging.warning(f"Failed to extract text from {pdf_path}")
-                return
+                return JSONResponse(content={"message": "Failed to extract text from PDF"}, status_code=400)
 
             response = self.send_to_azure_openai(text)
-
-            self.save_response(response, pdf_path)
+            self.processed_files.add(file_hash)
+            return JSONResponse(content=response, status_code=200)
         except Exception as e:
-            logging.error(f"Error processing {pdf_path}: {str(e)}")
+            logging.error(f"Error processing PDF: {str(e)}")
+            return JSONResponse(content={"message": f"Error processing PDF: {str(e)}"}, status_code=500)
 
-    def extract_text_from_pdf(self, pdf_path):
+    def get_file_hash(self, contents):
+        hasher = hashlib.md5()
+        hasher.update(contents)
+        return hasher.hexdigest()
+
+    def extract_text_from_pdf(self, contents):
         try:
-            with open(pdf_path, 'rb') as file:
-                reader = PyPDF2.PdfReader(file)
-                text = ""
-                for page in reader.pages:
-                    text += page.extract_text()
+            pdf_file = BytesIO(contents)
+            reader = PyPDF2.PdfReader(pdf_file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text()
             return text
         except Exception as e:
-            logging.error(f"Error extracting text from {pdf_path}: {str(e)}")
+            logging.error(f"Error extracting text from PDF: {str(e)}")
             return None
 
     def send_to_azure_openai(self, content):
@@ -91,29 +100,17 @@ class PDFHandler(FileSystemEventHandler):
                 """}
             ]
         }
-
         response = requests.post(self.api_url, headers=headers, json=data)
         return response.json()
 
-    def save_response(self, response, pdf_path):
-        output_filename = os.path.splitext(os.path.basename(pdf_path))[0] + '_analysis.json'
-        output_path = os.path.join(os.path.dirname(pdf_path), output_filename)
-        with open(output_path, 'w') as f:
-            json.dump(response, f, indent=2)
+pdf_processor = PDFProcessor(os.getenv("API_KEY"), os.getenv("API_ENDPOINT"))
+
+@app.post("/process-pdf")
+async def process_pdf(file: UploadFile = File(...)):
+    if file.filename.endswith('.pdf'):
+        return await pdf_processor.process_pdf(file)
+    else:
+        return JSONResponse(content={"message": "Only PDF files are allowed"}, status_code=400)
 
 if __name__ == "__main__":
-    api_key = os.getenv("API_KEY")
-    api_url = os.getenv("API_ENDPOINT")
-
-    path = "./files"
-    event_handler = PDFHandler(api_key, api_url)
-    observer = Observer()
-    observer.schedule(event_handler, path, recursive=False)
-    observer.start()
-
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        observer.stop()
-    observer.join()
+    uvicorn.run(app, host="0.0.0.0", port=8000)
