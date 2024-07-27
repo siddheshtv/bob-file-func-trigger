@@ -7,7 +7,35 @@ import PyPDF2
 import requests
 import dotenv
 
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+
+
 dotenv.load_dotenv()
+
+banking_departments = """
+Retail Banking/
+Corporate Banking/
+Treasury/
+Risk Management/
+Compliance/
+Audit and Inspection/
+Human Resources/
+Information Technology/
+Operations/
+Credit/
+International Banking/
+Legal/
+Marketing/
+Recovery/
+Customer Service/
+Accounts and Finance/
+Branch Administration/
+Wealth Management/
+Agricultural and Rural Banking/
+Small and Medium Enterprises (SME) Banking
+"""
 
 class PDFHandler(FileSystemEventHandler):
     def __init__(self, api_key, api_url):
@@ -19,22 +47,29 @@ class PDFHandler(FileSystemEventHandler):
             self.process_pdf(event.src_path)
 
     def process_pdf(self, pdf_path):
-        # Extract text from PDF
-        text = self.extract_text_from_pdf(pdf_path)
+        try:
+            text = self.extract_text_from_pdf(pdf_path)
+            if not text:
+                logging.warning(f"Failed to extract text from {pdf_path}")
+                return
 
-        # Send request to Azure OpenAI
-        response = self.send_to_azure_openai(text)
+            response = self.send_to_azure_openai(text)
 
-        # Save response as JSON
-        self.save_response(response, pdf_path)
+            self.save_response(response, pdf_path)
+        except Exception as e:
+            logging.error(f"Error processing {pdf_path}: {str(e)}")
 
     def extract_text_from_pdf(self, pdf_path):
-        with open(pdf_path, 'rb') as file:
-            reader = PyPDF2.PdfReader(file)
-            text = ""
-            for page in reader.pages:
-                text += page.extract_text()
-        return text
+        try:
+            with open(pdf_path, 'rb') as file:
+                reader = PyPDF2.PdfReader(file)
+                text = ""
+                for page in reader.pages:
+                    text += page.extract_text()
+            return text
+        except Exception as e:
+            logging.error(f"Error extracting text from {pdf_path}: {str(e)}")
+            return None
 
     def send_to_azure_openai(self, content):
         headers = {
@@ -46,11 +81,11 @@ class PDFHandler(FileSystemEventHandler):
             "messages": [
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": f"""
-                Based on the following content, provide:
-                1. Implementation Hardness level
-                2. Who passed the guideline
+                Based on the following content, provide (ONE WORD ONLY):
+                1. Implementation Hardness level (Easy/Medium/Hard)
+                2. Who passed the guideline (Name of person/or someone who has made the guideline)
                 3. When the Guideline was published (active date)
-                4. The department of the bank this guideline is for
+                4. The department of the bank this guideline is for {banking_departments}
                 Content: {content}
                 Please provide concise answers to minimize token usage.
                 """}
@@ -70,7 +105,7 @@ if __name__ == "__main__":
     api_key = os.getenv("API_KEY")
     api_url = os.getenv("API_ENDPOINT")
 
-    path = "./bob-summa/files"
+    path = "./files"
     event_handler = PDFHandler(api_key, api_url)
     observer = Observer()
     observer.schedule(event_handler, path, recursive=False)
